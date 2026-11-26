@@ -8,16 +8,60 @@ on:
 permissions:
   contents: write
 
+env:
+  CS16_REPO: https://github.com/Velaron/cs16-client
+  ENGINE_IPA: https://github.com/FWGS/xash3d-fwgs/releases/download/continuous/xash3d-fwgs-ios-arm64.ipa
+
 jobs:
+  assets:
+    name: game assets
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    steps:
+      - name: Install steamcmd
+        run: |
+          set -euo pipefail
+          sudo dpkg --add-architecture i386
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq lib32gcc-s1 lib32stdc++6 ca-certificates curl
+          mkdir -p "$HOME/steamcmd" && cd "$HOME/steamcmd"
+          curl -sqL https://steamcdn-a.akamaihd.net/client/installer/steamcmd_linux.tar.gz | tar zxf -
+          ./steamcmd.sh +quit >/dev/null 2>&1 || true
+          ls -l steamcmd.sh
+
+      - name: Download HLDS cstrike content
+        run: |
+          set -euo pipefail
+          cd "$HOME/steamcmd"
+          ./steamcmd.sh +force_install_dir "$PWD/hlds" +login anonymous \
+            +app_set_config 90 mod cstrike +app_update 90 validate +quit
+          du -sh hlds || true
+          ls hlds || true
+
+      - name: Prune to client-needed cstrike
+        run: |
+          set -euo pipefail
+          cd "$HOME/steamcmd"
+          rm -rf hlds/valve hlds/platform hlds/steamapps hlds/.steam hlds/bin hlds/hlds_run hlds/hlds_linux 2>/dev/null || true
+          rm -rf hlds/cstrike/dlls hlds/cstrike/cl_dlls hlds/cstrike/logs hlds/cstrike/addons 2>/dev/null || true
+          mkdir -p "$GITHUB_WORKSPACE/assets"
+          cp -R hlds/cstrike "$GITHUB_WORKSPACE/assets/"
+          du -sh "$GITHUB_WORKSPACE/assets"
+          find "$GITHUB_WORKSPACE/assets" -name '*.bsp' | wc -l
+
+      - name: Upload assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: cstrike-assets
+          path: assets/
+          retention-days: 5
+          compression-level: 6
+
   build:
+    name: build ipa
+    needs: assets
     runs-on: macos-26
-    timeout-minutes: 90
-
-    env:
-      # yapb 的编译选项脚本把 iOS 当成 macOS：会塞 -mmacosx-version-min / -msse / -march=x86-64，
-      # 和 iOS 工具链的 -miphoneos-version-min 直接冲突。这里统一由本文件修补，不依赖上游。
-      CS16_REPO: https://github.com/Velaron/cs16-client
-
+    timeout-minutes: 120
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -31,74 +75,83 @@ jobs:
             xcrun --sdk iphoneos --show-sdk-path
             sw_vers
             cmake --version | head -1
-          } 2>&1 | tee build.log
+          } 2>&1 | tee "$GITHUB_WORKSPACE/build.log"
+
+      - name: Download engine ipa
+        run: |
+          set -eo pipefail
+          curl -L --retry 3 -o engine.ipa "$ENGINE_IPA"
+          ls -lh engine.ipa
+
+      - name: Download game assets
+        uses: actions/download-artifact@v4
+        with:
+          name: cstrike-assets
+          path: assets
 
       - name: Clone cs16-client
         run: |
           set -eo pipefail
-          {
-            git clone --depth 1 --recursive "$CS16_REPO" mods/cs16-client
-            echo "cs16:  $(git -C mods/cs16-client rev-parse --short HEAD)"
-            echo "yapb:  $(git -C mods/cs16-client/3rdparty/yapb rev-parse --short HEAD)"
-          } 2>&1 | tee -a build.log
+          git clone --depth 1 --recursive "$CS16_REPO" mods/cs16-client
+          echo "cs16: $(git -C mods/cs16-client rev-parse --short HEAD)"
 
-      - name: Patch third-party for iOS
+      - name: Patch yapb for iOS
         run: |
           set -eo pipefail
-          {
-            FLAGS=mods/cs16-client/3rdparty/yapb/cmake/YapbFlags.cmake
-            echo "--- before:"; grep -n "elseif(APPLE)" "$FLAGS"
-            perl -pi -e 's/elseif\(APPLE\)/elseif(APPLE AND NOT CMAKE_SYSTEM_NAME MATCHES "iOS")/' "$FLAGS"
-            echo "--- after:"; grep -n "elseif(APPLE" "$FLAGS"
-            grep -q 'NOT CMAKE_SYSTEM_NAME MATCHES "iOS"' "$FLAGS" || { echo "patch failed"; exit 1; }
-          } 2>&1 | tee -a build.log
-
-      - name: Configure cs16-client for iOS arm64
-        run: |
-          set -eo pipefail
-          {
-            SDK=$(xcrun --sdk iphoneos --show-sdk-path)
-            cd mods/cs16-client
-            cmake -S . -B build \
-              -DCMAKE_SYSTEM_NAME=iOS \
-              -DCMAKE_SYSTEM_PROCESSOR=arm64 \
-              -DCMAKE_OSX_ARCHITECTURES=arm64 \
-              -DCMAKE_OSX_SYSROOT="$SDK" \
-              -DCMAKE_OSX_DEPLOYMENT_TARGET=12.0 \
-              -DCMAKE_BUILD_TYPE=Release \
-              -DYAPB_NOSIMD=ON \
-              -DMAC=0 -DXASH_COMPAT=1 -DMAINUI_USE_STB=1
-          } 2>&1 | tee -a ../../build.log
-        working-directory: .
+          FLAGS=mods/cs16-client/3rdparty/yapb/cmake/YapbFlags.cmake
+          grep -n "elseif(APPLE)" "$FLAGS"
+          perl -pi -e 's/elseif\(APPLE\)/elseif(APPLE AND NOT CMAKE_SYSTEM_NAME MATCHES "iOS")/' "$FLAGS"
+          grep -q 'NOT CMAKE_SYSTEM_NAME MATCHES "iOS"' "$FLAGS"
 
       - name: Build cs16-client
         run: |
           set -eo pipefail
-          {
-            cd mods/cs16-client
-            cmake --build build --config Release -j"$(sysctl -n hw.ncpu)"
-          } 2>&1 | tee -a ../../build.log
+          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          cd mods/cs16-client
+          cmake -S . -B build \
+            -DCMAKE_SYSTEM_NAME=iOS \
+            -DCMAKE_SYSTEM_PROCESSOR=arm64 \
+            -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DCMAKE_OSX_SYSROOT="$SDK" \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=12.0 \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DYAPB_NOSIMD=ON \
+            -DMAC=0 -DXASH_COMPAT=1 -DMAINUI_USE_STB=1 > /dev/null
+          cmake --build build --config Release -j"$(sysctl -n hw.ncpu)" > /dev/null
+          rm -rf "$GITHUB_WORKSPACE/stage"
+          cmake --install build --prefix "$GITHUB_WORKSPACE/stage"
+          find "$GITHUB_WORKSPACE/stage" -name '*.dylib' -exec sh -c 'echo "$1: $(lipo -archs "$1")"' _ {} \;
 
-      - name: Install cstrike payload
+      - name: Package ipa
         run: |
           set -eo pipefail
-          {
-            cd mods/cs16-client
-            rm -rf ../../stage
-            cmake --install build --prefix "$PWD/../../stage"
-            echo "--- stage tree"
-            find ../../stage -maxdepth 4 -type f | head -60
-            echo "--- dylibs"
-            find ../../stage -name '*.dylib' -exec sh -c 'echo "$1"; file "$1"' _ {} \;
-          } 2>&1 | tee -a ../../build.log
+          chmod +x ci/package.sh
+          bash ci/package.sh 2>&1 | tee "$GITHUB_WORKSPACE/package.log"
 
-      - name: Upload artifacts
+      - name: Upload ipa
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: cs-ios-build
+          name: cs16-ipa
           path: |
+            out/*.ipa
             build.log
-            stage/
+            package.log
           if-no-files-found: warn
           retention-days: 30
+
+      - name: Publish release
+        if: success()
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v1.6-ios
+          name: Counter-Strike 1.6 for iOS
+          make_latest: true
+          files: out/CS16-unsigned.ipa
+          body: |
+            CS 1.6 (Xash3D FWGS + cs16-client) arm64, unsigned.
+
+            - 内置 cstrike 资源，首启自动释放到 Documents
+            - 触屏：引擎 in_touch（摇杆 / 开火 / 视角）
+            - 联机：GoldSrc 协议，可直接 connect 服务器
+            - 安装：需自签（TrollStore / ESign / AltStore）
