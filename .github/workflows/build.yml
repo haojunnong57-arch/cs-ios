@@ -11,7 +11,12 @@ permissions:
 jobs:
   build:
     runs-on: macos-26
-    timeout-minutes: 60
+    timeout-minutes: 90
+
+    env:
+      # yapb 的编译选项脚本把 iOS 当成 macOS：会塞 -mmacosx-version-min / -msse / -march=x86-64，
+      # 和 iOS 工具链的 -miphoneos-version-min 直接冲突。这里统一由本文件修补，不依赖上游。
+      CS16_REPO: https://github.com/Velaron/cs16-client
 
     steps:
       - name: Checkout
@@ -25,75 +30,77 @@ jobs:
             xcrun --sdk iphoneos --show-sdk-version
             xcrun --sdk iphoneos --show-sdk-path
             sw_vers
+            cmake --version | head -1
           } 2>&1 | tee build.log
 
-      - name: Fetch engine and mod
+      - name: Clone cs16-client
         run: |
           set -eo pipefail
           {
-            git clone --depth 1 --recursive https://github.com/FWGS/xash3d-fwgs engine
-            git clone --depth 1 --recursive https://github.com/Velaron/cs16-client mods/cs16-client
-            echo "engine: $(git -C engine rev-parse --short HEAD)"
-            echo "cs16:   $(git -C mods/cs16-client rev-parse --short HEAD)"
+            git clone --depth 1 --recursive "$CS16_REPO" mods/cs16-client
+            echo "cs16:  $(git -C mods/cs16-client rev-parse --short HEAD)"
+            echo "yapb:  $(git -C mods/cs16-client/3rdparty/yapb rev-parse --short HEAD)"
           } 2>&1 | tee -a build.log
 
-      - name: Build mod with official iOS script
+      - name: Patch third-party for iOS
         run: |
           set -eo pipefail
           {
-            cd engine
-            export MACOSX_DEPLOYMENT_TARGET=
-            export SDKROOT=$(xcrun --sdk iphoneos --show-sdk-path)
-            bash scripts/ios/buildcs16.sh
-            cd ..
-            find build/ios -type f | head -50
+            FLAGS=mods/cs16-client/3rdparty/yapb/cmake/YapbFlags.cmake
+            echo "--- before:"; grep -n "elseif(APPLE)" "$FLAGS"
+            # iOS 不是 macOS：整段 APPLE 分支只能给桌面 Darwin 用
+            python3 - "$FLAGS" <<'PY'
+import sys, io
+p = sys.argv[1]
+s = open(p, encoding='utf-8').read()
+old = 'elseif(APPLE)'
+new = 'elseif(APPLE AND NOT CMAKE_SYSTEM_NAME MATCHES "iOS")'
+assert old in s, 'APPLE branch not found'
+s = s.replace(old, new, 1)
+open(p, 'w', encoding='utf-8').write(s)
+print('patched:', new)
+PY
+            echo "--- after:"; grep -n "elseif(APPLE" "$FLAGS"
           } 2>&1 | tee -a build.log
 
-      - name: Install ninja
-        run: brew install ninja || true
-
-      - name: Build host tool (yapb) on macOS
-        continue-on-error: true
-        run: |
-          set -o pipefail
-          {
-            cmake -S engine/3rdparty/yapb -B yapb-build -G Ninja -DCMAKE_BUILD_TYPE=Release || true
-            cmake --build yapb-build || true
-          } 2>&1 | tee -a build.log
-
-      - name: Build engine for iOS arm64
+      - name: Configure cs16-client for iOS arm64
         run: |
           set -eo pipefail
           {
-            export MACOSX_DEPLOYMENT_TARGET=
-            cmake -S engine -B engine-build -G Ninja \
+            SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+            cd mods/cs16-client
+            cmake -S . -B build \
               -DCMAKE_SYSTEM_NAME=iOS \
-              -DCMAKE_OSX_SYSROOT=iphoneos \
+              -DCMAKE_SYSTEM_PROCESSOR=arm64 \
               -DCMAKE_OSX_ARCHITECTURES=arm64 \
+              -DCMAKE_OSX_SYSROOT="$SDK" \
               -DCMAKE_OSX_DEPLOYMENT_TARGET=12.0 \
-              -DCMAKE_C_FLAGS="-miphoneos-version-min=12.0" \
-              -DCMAKE_CXX_FLAGS="-miphoneos-version-min=12.0" \
-              -DCMAKE_EXE_LINKER_FLAGS="-miphoneos-version-min=12.0" \
               -DCMAKE_BUILD_TYPE=Release \
-              -DXASH_SDL=Yes \
-              -DXASH_VOICEMOD=OFF \
-              -DXASH_DEDICATED=OFF \
-              -DXASH_LOADLIBRARY=ON \
-              -DMAINUI_USE_STB=1
-            cmake --build engine-build --config Release
-          } 2>&1 | tee -a build.log
+              -DYAPB_NOSIMD=ON \
+              -DMAC=0 -DXASH_COMPAT=1 -DMAINUI_USE_STB=1
+          } 2>&1 | tee -a ../../build.log
+        working-directory: .
 
-      - name: Collect binaries
-        if: always()
+      - name: Build cs16-client
         run: |
-          set -o pipefail
+          set -eo pipefail
           {
-            mkdir -p out
-            find engine-build -name '*.dylib' -exec cp {} out/ \; 2>/dev/null || true
-            find build -type f \( -name '*.dylib' -o -name '*.so' \) -exec cp {} out/ \; 2>/dev/null || true
-            ls -lh out/ || true
-            file out/* 2>/dev/null | head -20 || true
-          } 2>&1 | tee -a build.log
+            cd mods/cs16-client
+            cmake --build build --config Release -j"$(sysctl -n hw.ncpu)"
+          } 2>&1 | tee -a ../../build.log
+
+      - name: Install cstrike payload
+        run: |
+          set -eo pipefail
+          {
+            cd mods/cs16-client
+            rm -rf ../../stage
+            cmake --install build --prefix "$PWD/../../stage"
+            echo "--- stage tree"
+            find ../../stage -maxdepth 4 -type f | head -60
+            echo "--- dylibs"
+            find ../../stage -name '*.dylib' -exec sh -c 'echo "$1"; file "$1"' _ {} \;
+          } 2>&1 | tee -a ../../build.log
 
       - name: Upload artifacts
         if: always()
@@ -102,6 +109,6 @@ jobs:
           name: cs-ios-build
           path: |
             build.log
-            out/
+            stage/
           if-no-files-found: warn
           retention-days: 30
