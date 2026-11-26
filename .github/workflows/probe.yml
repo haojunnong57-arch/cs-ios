@@ -1,0 +1,71 @@
+name: Probe HLDS client files
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/probe.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  probe:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install steamcmd
+        run: |
+          set -euo pipefail
+          sudo dpkg --add-architecture i386
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq lib32gcc-s1 lib32stdc++6 ca-certificates curl
+          mkdir -p "$HOME/steamcmd" && cd "$HOME/steamcmd"
+          curl -sqL https://steamcdn-a.akamaihd.net/client/installer/steamcmd_linux.tar.gz | tar zxf -
+          ./steamcmd.sh +quit >/dev/null 2>&1 || true
+
+      - name: Download HLDS
+        run: |
+          set -euo pipefail
+          cd "$HOME/steamcmd"
+          ./steamcmd.sh +force_install_dir "$PWD/hlds" +login anonymous \
+            +app_set_config 90 mod cstrike +app_update 90 validate +quit
+
+      - name: Find gfx.wad and list trees
+        run: |
+          set -euo pipefail
+          cd "$HOME/steamcmd/hlds"
+          {
+            echo "== top level"; ls -1
+            echo "== valve"; ls -1 valve 2>/dev/null | head -60
+            echo "== cstrike"; ls -1 cstrike 2>/dev/null | head -60
+            echo "== all gfx.wad"; find . -name 'gfx.wad' -exec ls -l {} \;
+            echo "== wad files"; find . -name '*.wad' -exec ls -l {} \; | head -40
+            echo "== pak files"; find . -name '*.pak' -exec ls -l {} \;
+            echo "== sizes"; du -sh valve cstrike 2>/dev/null
+          } | tee "$GITHUB_WORKSPACE/probe.txt"
+          mkdir -p "$GITHUB_WORKSPACE/extra"
+          find . -name 'gfx.wad' -exec cp {} "$GITHUB_WORKSPACE/extra/" \;
+          ls -lh "$GITHUB_WORKSPACE/extra"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hlds-extra
+          path: |
+            extra/
+            probe.txt
+          if-no-files-found: warn
+          retention-days: 10
+
+      - name: Publish extra files
+        if: success()
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: assets-extra
+          name: CS 1.6 extra client files
+          make_latest: false
+          files: |
+            extra/*
+            probe.txt
