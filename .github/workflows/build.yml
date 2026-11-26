@@ -48,19 +48,9 @@ jobs:
           {
             FLAGS=mods/cs16-client/3rdparty/yapb/cmake/YapbFlags.cmake
             echo "--- before:"; grep -n "elseif(APPLE)" "$FLAGS"
-            # iOS 不是 macOS：整段 APPLE 分支只能给桌面 Darwin 用
-            python3 - "$FLAGS" <<'PY'
-import sys, io
-p = sys.argv[1]
-s = open(p, encoding='utf-8').read()
-old = 'elseif(APPLE)'
-new = 'elseif(APPLE AND NOT CMAKE_SYSTEM_NAME MATCHES "iOS")'
-assert old in s, 'APPLE branch not found'
-s = s.replace(old, new, 1)
-open(p, 'w', encoding='utf-8').write(s)
-print('patched:', new)
-PY
+            perl -pi -e 's/elseif\(APPLE\)/elseif(APPLE AND NOT CMAKE_SYSTEM_NAME MATCHES "iOS")/' "$FLAGS"
             echo "--- after:"; grep -n "elseif(APPLE" "$FLAGS"
+            grep -q 'NOT CMAKE_SYSTEM_NAME MATCHES "iOS"' "$FLAGS" || { echo "patch failed"; exit 1; }
           } 2>&1 | tee -a build.log
 
       - name: Configure cs16-client for iOS arm64
