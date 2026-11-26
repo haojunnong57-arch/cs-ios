@@ -36,6 +36,10 @@ else
 fi
 mkdir -p "$APP/cstrike/cl_dlls" "$APP/cstrike/dlls"
 
+log "清掉非 iOS 的库（必须在复制模组之前，否则会连新复制的 *_ios_arm64.dylib 一起删掉）"
+rm -f "$APP/cstrike/dlls/"*.so "$APP/cstrike/cl_dlls/"*.so 2>/dev/null || true
+rm -f "$APP/cstrike/dlls/"*.dylib "$APP/cstrike/cl_dlls/"*.dylib 2>/dev/null || true
+
 log "安装 mod dylib（引擎查找后缀：_ios_arm64）"
 for f in "${ROOT}"/stage/cstrike/cl_dlls/*.dylib; do
   [ -e "$f" ] || continue
@@ -49,7 +53,7 @@ for f in "${ROOT}"/stage/cstrike/dlls/*.dylib; do
   base="${base%_arm64}"
   cp "$f" "$APP/cstrike/dlls/${base}_ios_arm64.dylib"
 done
-[ -e "${ROOT}/stage/cstrike/extras.pk3" ] && cp "${ROOT}/stage/cstrike/extras.pk3" "$APP/cstrike/"
+{ [ -e "${ROOT}/stage/cstrike/extras.pk3" ] && cp "${ROOT}/stage/cstrike/extras.pk3" "$APP/cstrike/"; } || true
 
 log "写 liblist.gam"
 cat > "$APP/cstrike/liblist.gam" <<EOF
@@ -60,10 +64,6 @@ type "multiplayer_only"
 gamedll "dlls/cs_ios_arm64.dylib"
 gamedll_osx "dlls/cs_ios_arm64.dylib"
 EOF
-
-log "清掉非 iOS 的库，避免误加载"
-rm -rf "$APP/cstrike/dlls/"*.so "$APP/cstrike/cl_dlls/"*.so 2>/dev/null || true
-rm -rf "$APP/cstrike/dlls/"*_arm64.dylib "$APP/cstrike/cl_dlls/"*_arm64.dylib 2>/dev/null || true
 
 log "改 Info.plist"
 python3 - "$APP/Info.plist" "$BUNDLE_ID" "$APP_NAME" "$VERSION" <<'PY'
@@ -129,4 +129,17 @@ names = z.namelist()
 print("条目:", len(names), "损坏:", bad or "无")
 print("含 DLL:", sum(1 for n in names if n.endswith(".dylib")))
 print("含地图:", sum(1 for n in names if "/maps/" in n and n.endswith(".bsp")))
+need = [
+    "Payload/Launcher.app/cstrike/cl_dlls/client_ios_arm64.dylib",
+    "Payload/Launcher.app/cstrike/cl_dlls/menu_ios_arm64.dylib",
+    "Payload/Launcher.app/cstrike/dlls/cs_ios_arm64.dylib",
+    "Payload/Launcher.app/cstrike/dlls/yapb_ios_arm64.dylib",
+    "Payload/Launcher.app/cstrike/liblist.gam",
+    "Payload/Launcher.app/libxash.dylib",
+]
+missing = [n for n in need if n not in names]
+if missing:
+    print("!! 缺少必需文件:", missing)
+    sys.exit(1)
+print("必需文件齐全")
 PY
