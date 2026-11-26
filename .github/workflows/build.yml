@@ -42,25 +42,45 @@ jobs:
           set -eo pipefail
           {
             cd engine
+            export MACOSX_DEPLOYMENT_TARGET=
+            export SDKROOT=$(xcrun --sdk iphoneos --show-sdk-path)
             bash scripts/ios/buildcs16.sh
             cd ..
             find build/ios -type f | head -50
+          } 2>&1 | tee -a build.log
+
+      - name: Install ninja
+        run: brew install ninja || true
+
+      - name: Build host tool (yapb) on macOS
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          {
+            cmake -S engine/3rdparty/yapb -B yapb-build -G Ninja -DCMAKE_BUILD_TYPE=Release || true
+            cmake --build yapb-build || true
           } 2>&1 | tee -a build.log
 
       - name: Build engine for iOS arm64
         run: |
           set -eo pipefail
           {
-            cmake -S engine -B engine-build -G Xcode \
+            export MACOSX_DEPLOYMENT_TARGET=
+            cmake -S engine -B engine-build -G Ninja \
               -DCMAKE_SYSTEM_NAME=iOS \
+              -DCMAKE_OSX_SYSROOT=iphoneos \
               -DCMAKE_OSX_ARCHITECTURES=arm64 \
               -DCMAKE_OSX_DEPLOYMENT_TARGET=12.0 \
+              -DCMAKE_C_FLAGS="-miphoneos-version-min=12.0" \
+              -DCMAKE_CXX_FLAGS="-miphoneos-version-min=12.0" \
+              -DCMAKE_EXE_LINKER_FLAGS="-miphoneos-version-min=12.0" \
+              -DCMAKE_BUILD_TYPE=Release \
               -DXASH_SDL=Yes \
               -DXASH_VOICEMOD=OFF \
               -DXASH_DEDICATED=OFF \
               -DXASH_LOADLIBRARY=ON \
               -DMAINUI_USE_STB=1
-            cmake --build engine-build --config Release -- -sdk iphoneos -arch arm64 -quiet
+            cmake --build engine-build --config Release
           } 2>&1 | tee -a build.log
 
       - name: Collect binaries
