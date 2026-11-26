@@ -1,0 +1,87 @@
+name: Build CS 1.6 iOS
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Toolchain
+        run: |
+          set -eo pipefail
+          {
+            xcodebuild -version
+            xcrun --sdk iphoneos --show-sdk-version
+            xcrun --sdk iphoneos --show-sdk-path
+            sw_vers
+          } 2>&1 | tee build.log
+
+      - name: Fetch engine and mod
+        run: |
+          set -eo pipefail
+          {
+            git clone --depth 1 --recursive https://github.com/FWGS/xash3d-fwgs engine
+            git clone --depth 1 --recursive https://github.com/Velaron/cs16-client mods/cs16-client
+            echo "engine: $(git -C engine rev-parse --short HEAD)"
+            echo "cs16:   $(git -C mods/cs16-client rev-parse --short HEAD)"
+          } 2>&1 | tee -a build.log
+
+      - name: Build mod with official iOS script
+        run: |
+          set -eo pipefail
+          {
+            cd engine
+            bash scripts/ios/buildcs16.sh
+            cd ..
+            find build/ios -type f | head -50
+          } 2>&1 | tee -a build.log
+
+      - name: Build engine for iOS arm64
+        run: |
+          set -eo pipefail
+          {
+            cmake -S engine -B engine-build -G Xcode \
+              -DCMAKE_SYSTEM_NAME=iOS \
+              -DCMAKE_OSX_ARCHITECTURES=arm64 \
+              -DCMAKE_OSX_DEPLOYMENT_TARGET=12.0 \
+              -DXASH_SDL=Yes \
+              -DXASH_VOICEMOD=OFF \
+              -DXASH_DEDICATED=OFF \
+              -DXASH_LOADLIBRARY=ON \
+              -DMAINUI_USE_STB=1
+            cmake --build engine-build --config Release -- -sdk iphoneos -arch arm64 -quiet
+          } 2>&1 | tee -a build.log
+
+      - name: Collect binaries
+        if: always()
+        run: |
+          set -o pipefail
+          {
+            mkdir -p out
+            find engine-build -name '*.dylib' -exec cp {} out/ \; 2>/dev/null || true
+            find build -type f \( -name '*.dylib' -o -name '*.so' \) -exec cp {} out/ \; 2>/dev/null || true
+            ls -lh out/ || true
+            file out/* 2>/dev/null | head -20 || true
+          } 2>&1 | tee -a build.log
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cs-ios-build
+          path: |
+            build.log
+            out/
+          if-no-files-found: warn
+          retention-days: 30
