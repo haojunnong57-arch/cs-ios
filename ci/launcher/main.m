@@ -13,8 +13,8 @@ static NSString *DocsDir(void)
 	return NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES)[0];
 }
 
-// 递归复制，目标已存在则跳过（幂等，可重复启动）
-static void CopyTree(NSString *src, NSString *dst)
+// 递归同步：目标缺失或大小不同就复制（幂等，可重复启动）
+static void SyncTree(NSString *src, NSString *dst)
 {
 	NSFileManager *fm = NSFileManager.defaultManager;
 	BOOL isDir = NO;
@@ -27,12 +27,15 @@ static void CopyTree(NSString *src, NSString *dst)
 		[fm createDirectoryAtPath:dst withIntermediateDirectories:YES attributes:nil error:nil];
 		NSArray *names = [fm contentsOfDirectoryAtPath:src error:nil];
 		for (NSString *name in names)
-			CopyTree([src stringByAppendingPathComponent:name], [dst stringByAppendingPathComponent:name]);
+			SyncTree([src stringByAppendingPathComponent:name], [dst stringByAppendingPathComponent:name]);
 	}
 	else
 	{
-		if ([fm fileExistsAtPath:dst])
+		NSDictionary *srcAttr = [fm attributesOfItemAtPath:src error:nil];
+		NSDictionary *dstAttr = [fm attributesOfItemAtPath:dst error:nil];
+		if (dstAttr && [dstAttr fileSize] == [srcAttr fileSize])
 			return;
+		[fm removeItemAtPath:dst error:nil];
 		[fm copyItemAtPath:src toPath:dst error:nil];
 	}
 }
@@ -76,12 +79,12 @@ static void CopyTree(NSString *src, NSString *dst)
 	NSString *docs = DocsDir();
 	NSString *game = [docs stringByAppendingPathComponent:@"cstrike"];
 	NSString *seed = [NSBundle.mainBundle.bundlePath stringByAppendingPathComponent:@"cstrike"];
-	NSString *liblist = [game stringByAppendingPathComponent:@"liblist.gam"];
-
-	if (![NSFileManager.defaultManager fileExistsAtPath:liblist])
+	// 每次启动都补齐：bundle 里有、Documents 里没有（或大小不同）的文件会被覆盖，
+	// 这样后续资源补丁只要重装包就生效，不用清数据。
+	if ([NSFileManager.defaultManager fileExistsAtPath:seed])
 	{
-		dispatch_async(dispatch_get_main_queue(), ^{ self.status.text = @"首次启动，正在释放资源（约 300MB）…"; });
-		CopyTree(seed, game);
+		dispatch_async(dispatch_get_main_queue(), ^{ self.status.text = @"正在校验游戏文件…"; });
+		SyncTree(seed, game);
 	}
 
 	dispatch_async(dispatch_get_main_queue(), ^{ [self runEngine]; });

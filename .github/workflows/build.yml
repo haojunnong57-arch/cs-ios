@@ -45,13 +45,18 @@ jobs:
           # 引擎在 Host_InitCommon 阶段必须读到 gamedir 下的 gfx.wad（HLDS 放在 valve/），
           # 所以先把它保下来再删 valve。
           mkdir -p /tmp/keep
-          find hlds -name 'gfx.wad' -exec cp {} /tmp/keep/ \; 2>/dev/null || true
+          find hlds -name '*.wad' -path '*valve/*' -exec cp {} /tmp/keep/ \; 2>/dev/null || true
           rm -rf hlds/valve hlds/platform hlds/steamapps hlds/.steam hlds/bin hlds/hlds_run hlds/hlds_linux 2>/dev/null || true
           rm -rf hlds/cstrike/dlls hlds/cstrike/cl_dlls hlds/cstrike/logs hlds/cstrike/addons 2>/dev/null || true
           mkdir -p "$GITHUB_WORKSPACE/assets"
           cp -R hlds/cstrike "$GITHUB_WORKSPACE/assets/"
-          for w in /tmp/keep/gfx.wad; do
-            [ -e "$w" ] && cp "$w" "$GITHUB_WORKSPACE/assets/cstrike/gfx.wad" && echo "gfx.wad: $(wc -c < "$w") bytes"
+          # CS 地图会引用 HL 的 wad（halflife.wad 等）和 gfx.wad，这些都只在 valve/ 里，
+          # 直接并进 cstrike/ 让引擎按同名文件优先命中。
+          for w in /tmp/keep/*.wad; do
+            [ -e "$w" ] || continue
+            base=$(basename "$w")
+            [ -e "$GITHUB_WORKSPACE/assets/cstrike/$base" ] || cp "$w" "$GITHUB_WORKSPACE/assets/cstrike/$base"
+            echo "wad: $base $(wc -c < "$w") bytes"
           done
           du -sh "$GITHUB_WORKSPACE/assets"
           find "$GITHUB_WORKSPACE/assets" -name '*.bsp' | wc -l
